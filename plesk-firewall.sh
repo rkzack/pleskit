@@ -24,29 +24,41 @@ Options:
   --no-enable               Do not enable firewall management
   --apply                   Apply + confirm firewall rules (default: on)
   --no-apply                Do not apply/confirm at the end
+
   --deny-rule-id ID         Set existing rule with numeric ID to action=deny
                             (can be specified multiple times)
-  --custom-rule SPEC        Create/update a custom rule. SPEC is a ';'-separated
-                            set of key=value pairs, for example:
 
-                              name=Plesk360;direction=input;action=allow;\\
-                              ports=8443/tcp,443/tcp,80/tcp;\\
-                              from=34.254.37.129,52.51.23.204,52.213.169.7
+  --custom-rule SPEC        Create/update a custom rule by NAME.
+                            SPEC is a ';'-separated list of key=value pairs:
 
-                            Required keys: name, direction, action
-                            Optional keys: ports, from
+                              name=...;direction=...;action=...;ports=...;from=...
+
+                            Required: name, direction, action
+                            Optional: ports, from
+
+  --set-rule SPEC           Update an existing rule by ID.
+                            SPEC is a ';'-separated list of key=value pairs:
+
+                              id=...;direction=...;action=...;ports=...;from=...
+
+                            Required: id
+                            Optional: direction, action, ports, from
+                            (only provided attributes will be changed)
 
   -h, --help                Show this help and exit
 
 Examples:
 
-  # Deny a few built-in rules by ID and apply firewall:
+  # Deny a couple of built-in rules by ID:
   $0 --deny-rule-id 23 --deny-rule-id 22
 
   # Add custom rules:
   $0 \\
     --custom-rule "name=Plesk360;direction=input;action=allow;ports=8443/tcp,443/tcp,80/tcp;from=34.254.37.129,52.51.23.204,52.213.169.7" \\
     --custom-rule "name=Block problematic countries;direction=input;action=deny;from=IL,KP,BR,RU,IR,CG,CF,CN,IQ"
+
+  # Restrict SSH (id 15) to US only:
+  $0 --set-rule "id=15;direction=input;action=allow;from=US"
 EOF
 }
 
@@ -54,6 +66,7 @@ ENABLE=1
 APPLY=1
 DENY_IDS=()
 CUSTOM_RULE_SPECS=()
+SET_RULE_SPECS=()
 
 # -------- argument parsing --------
 while [[ $# -gt 0 ]]; do
@@ -77,6 +90,10 @@ while [[ $# -gt 0 ]]; do
 		--custom-rule)
 			shift || { echo "Missing value for --custom-rule" >&2; exit 1; }
 			CUSTOM_RULE_SPECS+=("$1")
+			;;
+		--set-rule)
+			shift || { echo "Missing value for --set-rule" >&2; exit 1; }
+			SET_RULE_SPECS+=("$1")
 			;;
 		-h|--help)
 			usage
@@ -110,7 +127,7 @@ else
 	log "Skipping firewall enable (per flags)"
 fi
 
-# -------- custom rules --------
+# -------- custom rules (by name) --------
 for spec in "${CUSTOM_RULE_SPECS[@]}"; do
 	NAME=""
 	DIRECTION=""
@@ -120,7 +137,6 @@ for spec in "${CUSTOM_RULE_SPECS[@]}"; do
 
 	IFS=';' read -ra PARTS <<< "$spec"
 	for kv in "${PARTS[@]}"; do
-		# ignore empty segments
 		[[ -z "$kv" ]] && continue
 		key=${kv%%=*}
 		val=${kv#*=}
@@ -154,7 +170,52 @@ for spec in "${CUSTOM_RULE_SPECS[@]}"; do
 	fi
 done
 
-# -------- deny existing rules by ID --------
+# -------- generic updates of existing rules by ID --------
+for spec in "${SET_RULE_SPECS[@]}"; do
+	ID=""
+	DIRECTION=""
+	ACTION=""
+	PORTS=""
+	FROM=""
+
+	IFS=';' read -ra PARTS <<< "$spec"
+	for kv in "${PARTS[@]}"; do
+		[[ -z "$kv" ]] && continue
+		key=${kv%%=*}
+		val=${kv#*=}
+		case "$key" in
+			id)        ID="$val" ;;
+			direction) DIRECTION="$val" ;;
+			action)    ACTION="$val" ;;
+			ports)     PORTS="$val" ;;
+			from)      FROM="$val" ;;
+			*)
+				log "WARNING: Unknown key '$key' in set-rule spec '$spec'"
+				;;
+		esac
+	done
+
+	if [[ -z "$ID" ]]; then
+		log "WARNING: Skipping set-rule spec with no id: $spec"
+		continue
+	fi
+
+	log "Updating existing rule id=$ID (direction='${DIRECTION:-unchanged}', action='${ACTION:-unchanged}', ports='${PORTS:-unchanged}', from='${FROM:-unchanged}')"
+
+	cmd=( "$FIREWALL_SETTINGS" --set-rule -id "$ID" )
+	[[ -n "$DIRECTION" ]] && cmd+=( -direction "$DIRECTION" )
+	[[ -n "$ACTION"    ]] && cmd+=( -action "$ACTION" )
+	[[ -n "$PORTS"     ]] && cmd+=( -ports "$PORTS" )
+	[[ -n "$FROM"      ]] && cmd+=( -from "$FROM" )
+
+	if ! "${cmd[@]}"; then
+		log "ERROR: Failed to update rule id=$ID"
+	else
+		log "Rule id=$ID updated successfully"
+	fi
+done
+
+# -------- deny existing rules by ID (convenience) --------
 for id in "${DENY_IDS[@]}"; do
 	log "Setting rule id $id to action=deny"
 	if ! "$FIREWALL_SETTINGS" --set-rule -id "$id" -action deny; then
